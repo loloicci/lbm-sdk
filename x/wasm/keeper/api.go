@@ -69,14 +69,67 @@ func (a cosmwasmAPIImpl) getContractEnv(contractAddrStr string, inputSize uint64
 	return env, cache, wasmStore, querier, a.keeper.gasMeter(*a.ctx), codeInfo.CodeHash, instantiateCost, gas, nil
 }
 
+// returns result, gas used error
+func (a cosmwasmAPIImpl) callCallablePoint(contractAddrStr string, name []byte, args []byte, isReadonly bool, callstack []byte, gasLimit uint64) ([]byte, uint64, error) {
+	contractAddr := sdk.MustAccAddressFromBech32(contractAddrStr)
+	_, codeInfo, prefixStore, err := a.keeper.contractInstance(*a.ctx, contractAddr)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	env := types.NewEnv(*a.ctx, contractAddr)
+	wasmStore := types.NewWasmStore(prefixStore)
+	gasMultiplier := a.keeper.getGasMultiplier(*a.ctx)
+	querier := NewQueryHandler(*a.ctx, a.keeper.wasmVMQueryHandler, contractAddr, gasMultiplier)
+	gasMeter := a.keeper.gasMeter(*a.ctx)
+	api := a.keeper.cosmwasmAPI(*a.ctx)
+	wasmGasLimit := a.keeper.getGasMultiplier(*a.ctx).ToWasmVMGas(gasLimit)
+
+	result, events, attrs, gas, err := a.keeper.wasmVM.CallCallablePoint(name, codeInfo.CodeHash, isReadonly, callstack, env, args, wasmStore, api, querier, gasMeter, wasmGasLimit, costJSONDeserialization)
+
+	// issue events and attrs
+	if len(attrs) != 0 {
+		eventsByAttr, err := newCallablePointEvent(attrs, contractAddr, callstack)
+		if err != nil {
+			return nil, 0, err
+		}
+		a.ctx.EventManager().EmitEvents(eventsByAttr)
+	}
+
+	if len(events) != 0 {
+		customEvents, err := newCustomCallablePointEvents(events, contractAddr, callstack)
+		if err != nil {
+			return nil, 0, err
+		}
+		a.ctx.EventManager().EmitEvents(customEvents)
+	}
+
+	return result, gas, err
+}
+
+// returns result, gas used, error
+func (a cosmwasmAPIImpl) validateInterface(contractAddrStr string, expectedInterface []byte) ([]byte, uint64, error) {
+	contractAddr := sdk.MustAccAddressFromBech32(contractAddrStr)
+	_, codeInfo, _, err := a.keeper.contractInstance(*a.ctx, contractAddr)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	result, err := a.keeper.wasmVM.ValidateDynamicLinkInterface(codeInfo.CodeHash, expectedInterface)
+
+	return result, 0, err
+}
+
 func (k Keeper) cosmwasmAPI(ctx sdk.Context) wasmvm.GoAPI {
 	x := cosmwasmAPIImpl{
 		keeper: &k,
 		ctx:    &ctx,
 	}
 	return wasmvm.GoAPI{
-		HumanAddress:     x.humanAddress,
-		CanonicalAddress: x.canonicalAddress,
-		GetContractEnv:   x.getContractEnv,
+		HumanAddress:      x.humanAddress,
+		CanonicalAddress:  x.canonicalAddress,
+		GetContractEnv:    x.getContractEnv,
+		CallCallablePoint: x.callCallablePoint,
+		ValidateInterface: x.validateInterface,
 	}
 }
